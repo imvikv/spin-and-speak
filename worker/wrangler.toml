@@ -4,6 +4,8 @@ compatibility_date = "2026-11-01"
 
 [vars]
 ALLOWED_ORIGINS = "https://imvikv.github.io"
+GROQ_MODEL = "openai/gpt-oss-120b"
+GROQ_STT_MODEL = "whisper-large-v3-turbo"
 GEMINI_MODEL = "gemini-3.7-flash"
 GEMINI_FALLBACK_MODEL = "gemini-3.1-flash-lite"
 MODEL_TIMEOUT_MS = "12000"
@@ -23,4 +25,5 @@ namespace_id = "1001"
 # id = "PASTE_KV_NAMESPACE_ID"
 
 # The Gemini key is a secret, never put it here. Set it with:
-#   npx wrangler secret put GEMINI_API_KEY
+#   npx wrangler secret put GROQ_API_KEY
+#   npx wrangler secret put GEMINI_API_KEY   (optional backup)

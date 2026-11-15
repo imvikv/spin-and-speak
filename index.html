@@ -434,8 +434,8 @@ function startTimer(){
   drawTimer();
 }
 function pauseTimer(){S.running=false;clearInterval(S.tick);drawTimer()}
-function stopMic(){if(dict&&micOn)dict.stop().catch(()=>{})}
-function resetTimer(){stopMic();pauseTimer();S.remain=S.dur;S.elapsed=0;drawTimer();updateStats()}
+function stopMic(discard){if(dict&&micOn)Promise.resolve(dict.stop(discard)).catch(()=>{})}
+function resetTimer(){stopMic(true);pauseTimer();S.remain=S.dur;S.elapsed=0;drawTimer();updateStats()}
 $("startBtn").onclick=()=>{
   if(S.running){pauseTimer();stopMic();return}
   if(dict&&micAllowed){
@@ -475,41 +475,60 @@ let sample=null, dict=null, micOn=false, micAllowed=true;
 sample = API_URL ? true : null;
 if(!sample){$("analyzeBtn").disabled=true;$("genBtn").disabled=true;$("aiNote").textContent="AI scoring isn't connected yet.";$("genNote").textContent="AI topics aren't connected yet."}
 
-// Browser speech-to-text (Chrome, Edge, Safari) with the same interface the page already uses
-function makeSpeech(){
-  const SR=window.SpeechRecognition||window.webkitSpeechRecognition; if(!SR) return null;
-  let rec=null, want=false, pending=null; const h={p:()=>{},f:()=>{},s:()=>{}};
-  function make(){
-    rec=new SR(); rec.continuous=true; rec.interimResults=true; rec.lang=$("langSel").value||"en-IN";
-    rec.onstart=()=>{ if(pending){pending.res();pending=null} h.s({state:"listening"}) };
-    rec.onresult=e=>{let interim="";for(let i=e.resultIndex;i<e.results.length;i++){const r=e.results[i];if(r.isFinal)h.f({text:r[0].transcript});else interim+=r[0].transcript}h.p({text:interim})};
-    rec.onerror=e=>{
-      if(e.error==="not-allowed"||e.error==="service-not-allowed"){want=false;
-        if(pending){pending.rej({code:"not_granted"});pending=null}else h.s({state:"idle",reason:"denied"})}
-    };
-    rec.onend=()=>{ // Chrome stops after a pause in speech: restart while the timer is running
-      if(want){ try{make();rec.start()}catch(err){want=false;h.s({state:"idle",reason:"ended"})} }
-      else h.s({state:"idle",reason:"stopped"});
-    };
+// Voice recorder: records while the timer runs; each Start→Pause stretch is sent to
+// Whisper (via the Worker) and the text is added to the answer box.
+let pendingTranscripts=[];
+function makeRecorder(){
+  if(!navigator.mediaDevices||!window.MediaRecorder) return null;
+  let stream=null, rec=null, chunks=[]; const h={p:()=>{},f:()=>{},s:()=>{}};
+  const mime=["audio/webm;codecs=opus","audio/webm","audio/mp4","audio/ogg"].find(m=>MediaRecorder.isTypeSupported(m))||"";
+  async function start(){
+    h.s({state:"starting"});
+    try{ if(!stream||!stream.active) stream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true}}); }
+    catch(err){ h.s({state:"idle",reason:"stopped"}); throw {code:err&&err.name==="NotAllowedError"?"not_granted":"error"}; }
+    chunks=[]; rec=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);
+    rec.ondataavailable=ev=>{if(ev.data&&ev.data.size)chunks.push(ev.data)};
+    rec.start(1000); h.s({state:"listening"});
   }
-  return {
-    start(){ want=true; h.s({state:"starting"});
-      return new Promise((res,rej)=>{ pending={res,rej}; try{make();rec.start()}catch(err){want=false;pending=null;rej({code:"error"})} }); },
-    stop(){ want=false; return new Promise(r=>{ if(!rec)return r(); const old=rec.onend; rec.onend=()=>{old&&old();r()}; try{rec.stop()}catch(err){r()} }); },
-    onPartial(f){h.p=f}, onFinal(f){h.f=f}, onState(f){h.s=f}
-  };
+  function stop(discard){
+    return new Promise(resolve=>{
+      if(!rec||rec.state==="inactive"){resolve();return}
+      rec.onstop=()=>{
+        const blob=new Blob(chunks,{type:rec.mimeType||mime||"audio/webm"}); chunks=[];
+        try{stream.getTracks().forEach(t=>t.stop())}catch(err){} stream=null;
+        if(discard||blob.size<4000){h.s({state:"idle",reason:"stopped"});resolve();return}
+        h.s({state:"transcribing"});
+        const job=transcribeBlob(blob).then(text=>{if(text)h.f({text})})
+          .catch(err=>toast(err&&err.code==="rate_limited"?"Too many recordings right now. Wait a minute.":"Couldn't turn that recording into text. Try again or type."))
+          .finally(()=>{pendingTranscripts=pendingTranscripts.filter(x=>x!==job);if(!pendingTranscripts.length)h.s({state:"idle",reason:"stopped"})});
+        pendingTranscripts.push(job); resolve(job);
+      };
+      try{rec.stop()}catch(err){resolve()}
+    });
+  }
+  return { start, stop, onPartial(f){h.p=f}, onFinal(f){h.f=f}, onState(f){h.s=f} };
 }
-dict=makeSpeech();
+async function transcribeBlob(blob){
+  const lang=($("langSel").value||"en-IN").slice(0,2);
+  const ctrl=new AbortController(), t=setTimeout(()=>ctrl.abort(),60000);
+  let res;
+  try{res=await fetch(API_URL+"/transcribe?lang="+lang,{method:"POST",signal:ctrl.signal,headers:{"Content-Type":blob.type||"audio/webm"},body:blob})}
+  catch(err){throw {code:"network"}} finally{clearTimeout(t)}
+  let data={}; try{data=await res.json()}catch(err){}
+  if(!res.ok) throw {code:data.error||"error"};
+  return data.text||"";
+}
+dict = API_URL ? makeRecorder() : null;
 if(dict) setupMic(); else $("langSel").style.display="none";
 
 function setupMic(){
   const b=$("micBtn");b.style.display="inline-flex";
-  dict.onPartial(({text})=>{$("partial").textContent=text||""});
-  dict.onFinal(({text})=>{if(!text)return;const a=$("answer");a.value=(a.value.trim()?a.value.trim()+" ":"")+text.trim();$("partial").textContent="";updateStats()});
-  dict.onState(({state,reason})=>{
-    const was=micOn;micOn=state==="listening";b.classList.toggle("live",micOn);
-    $("micTxt").textContent=micOn?"Listening…":state==="idle"?"Mic starts with the timer":"Starting mic…";
-    if(was&&state==="idle"&&reason!=="stopped"&&S.running){pauseTimer();toast("Mic stopped, timer paused. Press Resume to continue.")}
+  dict.onPartial(()=>{});
+  dict.onFinal(({text})=>{if(!text)return;const a=$("answer");a.value=(a.value.trim()?a.value.trim()+" ":"")+text.trim();updateStats()});
+  dict.onState(({state})=>{
+    micOn=state==="listening";b.classList.toggle("live",micOn);
+    $("micTxt").textContent=micOn?"Recording…":state==="transcribing"?"Turning speech into text…":state==="starting"?"Starting mic…":"Mic starts with the timer";
+    $("partial").textContent=state==="transcribing"?"Transcribing your answer…":"";
   });
   drawTimer();
 }
@@ -529,10 +548,12 @@ function aiErr(e){return e&&(e.code==="rate_limited")?"Too many requests right n
 /* ---------- scoring ---------- */
 $("analyzeBtn").onclick=async()=>{
   if(!sample)return;
+  if(micOn){try{await dict.stop()}catch(e){}}
+  if(pendingTranscripts.length){$("aiNote").className="note";$("aiNote").textContent="Finishing the transcript…";$("analyzeBtn").disabled=true;
+    try{await Promise.all(pendingTranscripts)}catch(e){} $("analyzeBtn").disabled=false}
   const ans=$("answer").value.trim(),w=words(ans);
   if(w<20){$("aiNote").textContent="Say or type at least 20 words so there's enough to score.";$("aiNote").className="note err";return}
   $("aiNote").className="note";$("aiNote").textContent="AI scores 6 skills and gives you specific fixes.";
-  if(micOn)try{await dict.stop()}catch(e){}
   pauseTimer();
   const topic=S.topic||"(no topic given; judge it as a free answer)";
   const f=countFillers(ans), wpm=S.elapsed>=10?Math.round(w/(S.elapsed/60)):null;
