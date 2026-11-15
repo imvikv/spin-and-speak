@@ -20,6 +20,10 @@ GitHub Pages (index.html)  ──POST /score, /topics──▶  Cloudflare Worke
 ```
 The website never sees the API key. The Worker only accepts requests from `ALLOWED_ORIGINS`, builds the prompts itself (so it can't be used as a general Gemini proxy), and limits each visitor to 10 calls a minute.
 
+## Deploys
+- **Website:** GitHub Pages publishes `index.html` from `main` automatically.
+- **Worker:** Cloudflare Workers Builds deploys `worker/` automatically on every push to `main` (root directory `/worker`, command `npx wrangler deploy`). Secrets stay in the Cloudflare dashboard.
+
 ## Set up the AI backend (one time, ~10 minutes)
 1. **Keys:** a Groq key from https://console.groq.com (free) and, optionally, a Gemini key from https://aistudio.google.com/apikey as a backup.
 2. **Deploy the Worker:**
