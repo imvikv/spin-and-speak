@@ -1,0 +1,24 @@
+name = "spin-and-speak-api"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[vars]
+ALLOWED_ORIGINS = "https://imvikv.github.io"
+GEMINI_MODEL = "gemini-3.7-flash"
+DAILY_LIMIT = "300"
+
+# Per-visitor limit: 10 AI calls per minute per IP
+[[ratelimits]]
+name = "RATE_LIMITER"
+namespace_id = "1001"
+  [ratelimits.simple]
+  limit = 10
+  period = 60
+
+# Optional site-wide daily cap. Create a KV namespace, then uncomment and paste its id:
+# [[kv_namespaces]]
+# binding = "USAGE"
+# id = "PASTE_KV_NAMESPACE_ID"
+
+# The Gemini key is a secret, never put it here. Set it with:
+#   npx wrangler secret put GEMINI_API_KEY

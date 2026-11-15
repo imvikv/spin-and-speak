@@ -1,15 +1,39 @@
 # Spin & Speak
 
-A random topic generator for impromptu speaking practice — interviews, group discussions and Toastmasters table topics — with AI scoring and areas of improvement.
+A random topic generator for impromptu speaking practice (interviews, group discussions, Toastmasters table topics) with AI scoring and areas of improvement.
+
+**Live:** https://imvikv.github.io/spin-and-speak/
 
 ## Features
-- Random topics (125 prompts) across Everyday, Work, Creative and Opinion; draw 1, 3 or 5
-- Countdown timer (1–5 min, ±30s, overtime) that starts the mic together
+- 125 random topics across Everyday, Work, Creative and Opinion; draw 1, 3 or 5
+- One button starts the countdown timer and the mic together (browser speech-to-text; Chrome/Edge/Safari)
 - Live word count, words-per-minute and filler-word counter
 - AI score out of 100 across six weighted skills: grammar, coherence, confidence, vocabulary, fluency, filler control
 - Areas to improve, language corrections, a polished rewrite and a next drill
 - Custom AI-generated topics for any audience or situation
 - Progress history saved in the browser
 
-## Status
-v0.1 — first draft. Next: GitHub Pages hosting, browser speech-to-text, and a small serverless backend for AI scoring.
+## How it fits together
+```
+GitHub Pages (index.html)  ──POST /score, /topics──▶  Cloudflare Worker (worker/)  ──▶  Google Gemini API
+                                                       holds GEMINI_API_KEY as a secret
+```
+The website never sees the API key. The Worker only accepts requests from `ALLOWED_ORIGINS`, builds the prompts itself (so it can't be used as a general Gemini proxy), and limits each visitor to 10 calls a minute.
+
+## Set up the AI backend (one time, ~10 minutes)
+1. **Gemini key:** create one at https://aistudio.google.com/apikey (free tier).
+2. **Deploy the Worker:**
+   ```bash
+   cd worker
+   npx wrangler login
+   npx wrangler deploy
+   npx wrangler secret put GEMINI_API_KEY   # paste the key when asked
+   ```
+   Note the URL it prints, e.g. `https://spin-and-speak-api.<you>.workers.dev`.
+3. **Check it:** open `<worker-url>/health`; it should return `{"ok":true,...}`.
+4. **Connect the site:** in `index.html`, set `const API_URL = "<worker-url>";` and push.
+
+### Optional
+- **Daily cap:** `npx wrangler kv namespace create USAGE`, paste the id into `wrangler.toml`, redeploy. Default cap is 300 AI calls/day (`DAILY_LIMIT`).
+- **Model:** change `GEMINI_MODEL` in `wrangler.toml`.
+- **Custom domain:** add it to `ALLOWED_ORIGINS` too.

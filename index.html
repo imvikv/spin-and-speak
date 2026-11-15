@@ -270,6 +270,10 @@ footer{padding:36px 0 48px;color:var(--ink-3);font-size:13px;text-align:center}
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M5 10a7 7 0 0 0 14 0M12 17v5"/></svg>
             <span id="micTxt">Mic starts with the timer</span>
           </span>
+          <select id="langSel" class="btn sm" title="Speech language">
+            <option value="en-IN">English (India)</option><option value="en-US">English (US)</option>
+            <option value="en-GB">English (UK)</option><option value="hi-IN">Hindi</option>
+          </select>
           <button class="btn sm" id="ownTopicBtn">Use my own topic</button>
           <button class="btn sm" id="clearBtn">Clear answer</button>
         </div>
@@ -462,14 +466,41 @@ function updateStats(){
 $("answer").addEventListener("input",updateStats);
 $("clearBtn").onclick=()=>{$("answer").value="";$("partial").textContent="";updateStats()};
 
-/* ---------- AI + dictation wiring ---------- */
+/* ---------- config ---------- */
+// Paste your Cloudflare Worker URL here after deploying (no trailing slash)
+const API_URL = "";
+
+/* ---------- AI + speech wiring ---------- */
 let sample=null, dict=null, micOn=false, micAllowed=true;
-(async()=>{
-  try{ if(window.claude&&claude.use){
-    claude.use("sample").then(s=>{sample=s;if(!s){$("analyzeBtn").disabled=true;$("genBtn").disabled=true;$("aiNote").textContent="AI scoring works when this page is opened on claude.ai.";$("genNote").textContent="AI topics work when this page is opened on claude.ai."}});
-    claude.use("dictation").then(d=>{dict=d;if(d)setupMic()});
-  } else { $("analyzeBtn").disabled=true;$("genBtn").disabled=true;$("aiNote").textContent="AI scoring works when this page is opened on claude.ai."; } }catch(e){}
-})();
+sample = API_URL ? true : null;
+if(!sample){$("analyzeBtn").disabled=true;$("genBtn").disabled=true;$("aiNote").textContent="AI scoring isn't connected yet.";$("genNote").textContent="AI topics aren't connected yet."}
+
+// Browser speech-to-text (Chrome, Edge, Safari) with the same interface the page already uses
+function makeSpeech(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition; if(!SR) return null;
+  let rec=null, want=false, pending=null; const h={p:()=>{},f:()=>{},s:()=>{}};
+  function make(){
+    rec=new SR(); rec.continuous=true; rec.interimResults=true; rec.lang=$("langSel").value||"en-IN";
+    rec.onstart=()=>{ if(pending){pending.res();pending=null} h.s({state:"listening"}) };
+    rec.onresult=e=>{let interim="";for(let i=e.resultIndex;i<e.results.length;i++){const r=e.results[i];if(r.isFinal)h.f({text:r[0].transcript});else interim+=r[0].transcript}h.p({text:interim})};
+    rec.onerror=e=>{
+      if(e.error==="not-allowed"||e.error==="service-not-allowed"){want=false;
+        if(pending){pending.rej({code:"not_granted"});pending=null}else h.s({state:"idle",reason:"denied"})}
+    };
+    rec.onend=()=>{ // Chrome stops after a pause in speech: restart while the timer is running
+      if(want){ try{make();rec.start()}catch(err){want=false;h.s({state:"idle",reason:"ended"})} }
+      else h.s({state:"idle",reason:"stopped"});
+    };
+  }
+  return {
+    start(){ want=true; h.s({state:"starting"});
+      return new Promise((res,rej)=>{ pending={res,rej}; try{make();rec.start()}catch(err){want=false;pending=null;rej({code:"error"})} }); },
+    stop(){ want=false; return new Promise(r=>{ if(!rec)return r(); const old=rec.onend; rec.onend=()=>{old&&old();r()}; try{rec.stop()}catch(err){r()} }); },
+    onPartial(f){h.p=f}, onFinal(f){h.f=f}, onState(f){h.s=f}
+  };
+}
+dict=makeSpeech();
+if(dict) setupMic(); else $("langSel").style.display="none";
 
 function setupMic(){
   const b=$("micBtn");b.style.display="inline-flex";
@@ -478,16 +509,18 @@ function setupMic(){
   dict.onState(({state,reason})=>{
     const was=micOn;micOn=state==="listening";b.classList.toggle("live",micOn);
     $("micTxt").textContent=micOn?"Listening…":state==="idle"?"Mic starts with the timer":"Starting mic…";
-    // only pause the timer if the mic was really listening and then got cut off (not our own Pause)
     if(was&&state==="idle"&&reason!=="stopped"&&S.running){pauseTimer();toast("Mic stopped, timer paused. Press Resume to continue.")}
   });
   drawTimer();
 }
 
-async function askJSON(prompt,tier){
-  if(typeof sample.json==="function") return await sample.json(prompt,{modelTier:tier});
-  const r=await sample(prompt,{modelTier:tier});const m=r.text.match(/\{[\s\S]*\}/);return JSON.parse(m?m[0]:r.text);
+async function api(path,body){
+  const res=await fetch(API_URL+path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  let data={}; try{data=await res.json()}catch(e){}
+  if(!res.ok) throw {code:data.error||"error"};
+  return data;
 }
+function aiErr(e){return e&&(e.code==="rate_limited")?"Too many requests right now. Wait a minute and try again.":e&&e.code==="daily_limit"?"Today's free AI limit is used up. Please try again tomorrow.":"Couldn't reach the AI. Please try again."}
 
 /* ---------- scoring ---------- */
 $("analyzeBtn").onclick=async()=>{
@@ -499,45 +532,15 @@ $("analyzeBtn").onclick=async()=>{
   pauseTimer();
   const topic=S.topic||"(no topic given; judge it as a free answer)";
   const f=countFillers(ans), wpm=S.elapsed>=10?Math.round(w/(S.elapsed/60)):null;
-  const spoken=!!(dict&&$("micBtn").dataset.used!=="no"&&S.elapsed>0);
   const R=$("report"),I=$("reportInner");R.classList.add("show");
   I.innerHTML=`<div class="loading"><div class="loader"></div>Scoring your answer…</div>`;
   R.scrollIntoView({behavior:"smooth",block:"start"});
   $("analyzeBtn").disabled=true;
-  const prompt=`You are an experienced public-speaking and interview coach. Score this impromptu answer fairly and specifically. Be encouraging but honest; do not inflate scores.
-
-TOPIC: ${topic}
-TARGET TIME: ${Math.round(S.dur)} seconds. TIME USED: ${Math.round(S.elapsed)} seconds.
-WORDS: ${w}. PACE: ${wpm?wpm+" words per minute":"unknown"}. FILLER WORDS DETECTED: ${f.n} ${JSON.stringify(f.found)}.
-NOTE: The answer may be a speech-to-text transcript, so ignore missing punctuation and capitalisation; judge the spoken language.
-
-ANSWER:
-"""${ans}"""
-
-Score each of these from 0 to 10 (decimals allowed):
-- grammar: correctness of sentences and tenses
-- coherence: clear opening, logical structure, relevance to the topic, a conclusion
-- confidence: assertiveness, persuasion, examples, conviction (avoid hedging)
-- vocabulary: range and precision of words
-- fluency: flow, sentence variety, pace (130-160 wpm is ideal when known), using the time well
-- filler_words: 10 = no fillers or repetition, lower as fillers increase relative to length
-
-Return ONLY JSON in exactly this shape:
-{"scores":{"grammar":n,"coherence":n,"confidence":n,"vocabulary":n,"fluency":n,"filler_words":n},
-"reasons":{"grammar":"max 12 words","coherence":"...","confidence":"...","vocabulary":"...","fluency":"...","filler_words":"..."},
-"verdict":"one sentence overall summary, max 25 words",
-"strengths":["2 to 3 specific strengths quoting their words where useful"],
-"improvements":[{"area":"short name","issue":"what went wrong, specific to this answer","fix":"concrete thing to do next time"}],
-"corrections":[{"original":"phrase from the answer","better":"improved phrase","why":"short reason"}],
-"polished":"a rewritten version of their answer of similar length that keeps their ideas but has a hook, 2-3 clear points and a strong close",
-"structure":"a one-line suggested structure for this topic, e.g. Point → Reason → Example → Point",
-"drill":"one short exercise to practise their weakest skill"}
-Give 3 to 4 improvements, ordered by impact. Give 0 to 5 corrections (only real ones).`;
   try{
-    const r=await askJSON(prompt,"default");
+    const r=await api("/score",{topic,answer:ans,targetSeconds:S.dur,elapsedSeconds:S.elapsed,words:w,wpm,fillers:f.found});
     renderReport(r,{topic,w,wpm,fill:f.n,elapsed:S.elapsed});
   }catch(e){
-    I.innerHTML=`<div class="loading">${e&&e.code==="rate_limited"?"Too many requests right now. Wait a minute and try again.":e&&e.code==="not_granted"?"AI access wasn't allowed for this page.":"Couldn't score this answer. Please try again."}</div>`;
+    I.innerHTML=`<div class="loading">${aiErr(e)}</div>`;
   }finally{$("analyzeBtn").disabled=false}
 };
 
@@ -606,12 +609,12 @@ $("genBtn").onclick=async()=>{
   if(!q){$("genNote").textContent="Describe who it's for or what you're preparing for.";$("genNote").className="note err";return}
   $("genNote").className="note";$("genNote").textContent="Generating…";$("genBtn").disabled=true;
   try{
-    const r=await askJSON(`Generate ${S.ccount} varied impromptu speaking topics for this situation: "${q}". Each should be answerable in 1-3 minutes without preparation, specific, and phrased as a question or prompt (max 22 words). Mix difficulty slightly. Return ONLY JSON: {"topics":[{"text":"...","tag":"1-2 word theme"}]}`,"quick");
+    const r=await api("/topics",{prompt:q,count:S.ccount});
     const list=(r.topics||[]).slice(0,S.ccount);const box=$("clist");box.innerHTML="";
     list.forEach((t,i)=>{const b=document.createElement("button");b.className="citem";b.innerHTML=`<span class="n">${String(i+1).padStart(2,"0")}</span><span><span class="t">${esc(t.text)}</span><br><span class="note">${esc(t.tag||"")}</span></span>`;
       b.onclick=()=>setTopic(t.text,"AI · "+(t.tag||"custom"),true);box.appendChild(b)});
     $("genNote").textContent=list.length?"Click a topic to practise it.":"No topics came back. Try rephrasing.";
-  }catch(e){$("genNote").className="note err";$("genNote").textContent=e&&e.code==="rate_limited"?"Too many requests. Wait a minute.":"Couldn't generate topics. Try again."}
+  }catch(e){$("genNote").className="note err";$("genNote").textContent=aiErr(e)}
   finally{$("genBtn").disabled=false}
 };
 
