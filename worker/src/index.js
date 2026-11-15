@@ -64,18 +64,40 @@ export default {
   },
 };
 
+// Try the main model first; if it is busy (429/503), errors (5xx) or is too slow, try the fallback.
 async function callGemini(env, prompt) {
-  const model = env.GEMINI_MODEL || "gemini-3.7-flash";
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-    body: JSON.stringify({
-      contents: [{ role: "user", parts: [{ text: prompt }] }],
-      generationConfig: { responseMimeType: "application/json", temperature: 0.4 },
-    }),
-  });
+  const models = [env.GEMINI_MODEL || "gemini-3.7-flash", env.GEMINI_FALLBACK_MODEL || "gemini-3.1-flash-lite"];
+  let lastErr;
+  for (const model of [...new Set(models)]) {
+    try { return await callModel(env, model, prompt); }
+    catch (e) {
+      lastErr = e;
+      const retryable = e.name === "AbortError" || e.status === 429 || (e.status >= 500 && e.status < 600);
+      if (!retryable) throw e;
+    }
+  }
+  throw lastErr;
+}
+
+async function callModel(env, model, prompt, lowThinking = true) {
+  const generationConfig = { responseMimeType: "application/json", temperature: 0.4 };
+  if (lowThinking) generationConfig.thinkingConfig = { thinkingLevel: "low" }; // faster replies
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), parseInt(env.MODEL_TIMEOUT_MS || "25000", 10));
+  let res;
+  try {
+    res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: "POST",
+      signal: ctrl.signal,
+      headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text: prompt }] }], generationConfig }),
+    });
+  } finally { clearTimeout(timer); }
   if (!res.ok) {
-    const err = new Error(`Gemini ${res.status}: ${(await res.text()).slice(0, 150)}`);
+    const text = await res.text();
+    // Some models don't accept thinkingLevel: retry once without it
+    if (res.status === 400 && lowThinking && /thinking/i.test(text)) return callModel(env, model, prompt, false);
+    const err = new Error(`Gemini ${model} ${res.status}: ${text.slice(0, 150)}`);
     err.status = res.status;
     throw err;
   }

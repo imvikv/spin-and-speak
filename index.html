@@ -515,12 +515,16 @@ function setupMic(){
 }
 
 async function api(path,body){
-  const res=await fetch(API_URL+path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+  const ctrl=new AbortController(), t=setTimeout(()=>ctrl.abort(),60000);
+  let res;
+  try{res=await fetch(API_URL+path,{method:"POST",signal:ctrl.signal,headers:{"Content-Type":"application/json"},body:JSON.stringify(body)})}
+  catch(e){throw {code:e.name==="AbortError"?"timeout":"network"}}
+  finally{clearTimeout(t)}
   let data={}; try{data=await res.json()}catch(e){}
   if(!res.ok) throw {code:data.error||"error"};
   return data;
 }
-function aiErr(e){return e&&(e.code==="rate_limited")?"Too many requests right now. Wait a minute and try again.":e&&e.code==="daily_limit"?"Today's free AI limit is used up. Please try again tomorrow.":"Couldn't reach the AI. Please try again."}
+function aiErr(e){return e&&(e.code==="rate_limited")?"Too many requests right now. Wait a minute and try again.":e&&e.code==="daily_limit"?"Today's free AI limit is used up. Please try again tomorrow.":e&&(e.code==="timeout"||e.code==="ai_error")?"The AI is busy right now. Please try again in a moment.":"Couldn't reach the AI. Please try again."}
 
 /* ---------- scoring ---------- */
 $("analyzeBtn").onclick=async()=>{
